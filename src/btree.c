@@ -1,5 +1,16 @@
 #include "btree.h"
-#include <stdio.h>
+
+#if BTREE_DTYPE >= 8
+#include <math.h>
+#include <float.h>
+
+#if BTREE_DTYPE == 8
+#define BTREE_EPSILON FLT_EPSILON
+#else
+#define BTREE_EPSILON DBL_EPSILON
+#endif
+
+#endif
 
 btree allocBtree(){
 	btree tree = calloc(1, sizeof(struct _btree_node));
@@ -9,7 +20,7 @@ btree allocBtree(){
 void split_node(btree tree){
 	btree child1, child2, parent;
 	uint8_t run = 1, x;
-	uint64_t key, *node_keys, *parent_keys;
+	btree_k_t key, *node_keys, *parent_keys, k_tmp[2];
 	void **node_childs, **node_values, *parent_childs[2], **parent_values;
 	while (1){
 		node_childs = tree->childs;
@@ -49,7 +60,7 @@ void split_node(btree tree){
 			node_keys[0] = node_keys[1];
 			node_values[0] = node_values[1];
 
-			memset(&node_keys[1], 0, 16);
+			memset(&node_keys[1], 0, sizeof(btree_k_t)*2);
 			memset(&node_values[1], 0, sizeof(void*)*2);
 			memset(node_childs, 0, sizeof(void*)*4);
 
@@ -82,9 +93,9 @@ void split_node(btree tree){
 
 				node_childs[1] = child1;
 
-				memcpy(parent_childs, parent_keys, 2*sizeof(void*));
-				memcpy(&parent_keys[1], parent_childs, 2*sizeof(void*));
-				memset(parent_childs, 0, 2*sizeof(void*));
+				memcpy(k_tmp, parent_keys, 2*sizeof(btree_k_t));
+				memcpy(&parent_keys[1], k_tmp, 2*sizeof(btree_k_t));
+				memset(parent_childs, 0, 2*sizeof(btree_k_t));
 
 				parent_keys[0] = node_keys[1];
 
@@ -109,7 +120,7 @@ void split_node(btree tree){
 				parent_keys[2] = node_keys[1];
 				parent_values[2] = node_values[1];
 			}
-			memset(&node_keys[1], 0, 16);
+			memset(&node_keys[1], 0, 2*sizeof(btree_k_t));
 			memset(&node_values[1], 0, 2*sizeof(void*));
 
 			parent->use++;
@@ -119,9 +130,9 @@ void split_node(btree tree){
 	}
 }
 
-void insert_key_to_btree(btree tree, uint64_t key, void *value){
+void insert_key_to_btree(btree tree, btree_k_t key, void *value){
 	uint8_t num, run=1;
-	uint64_t *keys, k_tmp[2];
+	btree_k_t *keys, k_tmp[2];
 	void **values, **childs, *tmp_ptr[3];
 	while (run){
 		num = tree->use;
@@ -145,7 +156,11 @@ void insert_key_to_btree(btree tree, uint64_t key, void *value){
 						tree = childs[x];
 					}
 					break;
+				#if BTREE_DTYPE < 8
 				}else if (key < keys[x]){
+				#else
+				}else if ((key - keys[x]) <= -BTREE_EPSILON){
+				#endif
 					if (childs[x] == NULL){
 						memcpy(k_tmp, &keys[x], 8*(2-x));
 						memcpy(&keys[x+1], k_tmp, 8*(2-x));
@@ -176,7 +191,7 @@ void insert_key_to_btree(btree tree, uint64_t key, void *value){
 	if (num == 3) split_node(tree);
 }
 
-void *get_value_from_btree(btree tree, uint64_t key){
+void *get_value_from_btree(btree tree, btree_k_t key){
 	uint64_t *keys;
 	uint8_t num;
 	void **childs, **values;
@@ -190,8 +205,18 @@ void *get_value_from_btree(btree tree, uint64_t key){
 		for (uint8_t x=0; x<num; x++){
 			register void *ptr;
 			register uint64_t k = keys[x];
+			#if BTREE_DTYPE < 8
 			if (key == k) return values[x];
+			#elif BTREE_DTYPE == 8
+			if (fabsf(key-k) <= BTREE_EPSILON) return values[x];
+			#elif BTREE_DTYPE == 9
+			if (fabs(key-k) <= BTREE_EPSILON) return values[x];
+			#endif
+			#if BTREE_DTYPE < 8
 			else if (key < k){
+			#else
+			else if ((key - k) <= -BTREE_EPSILON){
+			#endif
 				ptr = childs[x];
 				if (ptr == NULL) return NULL;
 				else{
@@ -206,10 +231,47 @@ void *get_value_from_btree(btree tree, uint64_t key){
 	return NULL;
 }
 
-void remove_key_from_btree(btree tree, uint64_t key, void **value){
+static void *get_first(btree tree, btree_k_t *key, btree *node){
+	void *child;
+	while (1){
+		child = tree->childs[0];
+		if (child == NULL) break;
+		tree = child;
+	}
+	key[0] = tree->keys[0];
+	if (node != NULL) node[0] = tree;
+	return tree->values[0];
+}
+
+static void *get_last(btree tree, btree_k_t *key, btree *node){
+	void *child, *value = NULL;
+	uint8_t num = tree->use;
+	while (num){
+		child = tree->childs[num];
+		if (child == NULL) break;
+		tree = child;
+		num = tree->use;
+	}
+	if (num > 0){
+		key[0] = tree->keys[num-1];
+		value = tree->values[num-1];
+		if (node != NULL) node[0] = tree;
+	}
+	return value;
+}
+
+void *get_first_value_from_btree(btree tree, btree_k_t *key){
+	return get_first(tree, key, NULL);
+}
+
+void *get_last_value_from_btree(btree tree, btree_k_t *key){
+	return get_last(tree, key, NULL);
+}
+
+void remove_key_from_btree(btree tree, btree_k_t key, void **value){
 	btree parent;
 	uint8_t run=1, num;
-	uint64_t *keys, *k, tmp_keys[2];
+	btree_k_t *keys, *k, tmp_keys[2];
 	void **node_childs, **node_values, *tmp_child[3];
 	void **p_childs, **p_value;
 	while (run){
@@ -223,12 +285,18 @@ void remove_key_from_btree(btree tree, uint64_t key, void **value){
 		tree = node_childs[num];
 		for (uint8_t x=0; x<num; x++){
 			register void *ptr;
-			register uint64_t _k = keys[x];
+			register btree_k_t _k = keys[x];
+			#if BTREE_DTYPE < 8
 			if (key == _k){
+			#elif BTREE_DTYPE == 8
+			if (fabsf(key - _k) <= BTREE_EPSILON){
+			#else
+			if (fabs(key - _k) <= BTREE_EPSILON){
+			#endif
 				p_childs = &node_childs[x];
 				k = &keys[x];
 				p_value = &node_values[x];
-				value[0] = node_values[x];
+				if (value != NULL) value[0] = node_values[x];
 				tree = current;
 				run = 0;
 				break;
@@ -342,7 +410,13 @@ void remove_key_from_btree(btree tree, uint64_t key, void **value){
 			goto remove_element_success;
 		}
 	}else{
+		#if BTREE_DTYPE < 8
 		if (keys[0] == key){
+		#elif BTREE_DTYPE == 8
+		if (fabsf(keys[0], key) <= BTREE_EPSILON){
+		#else
+		if (fabs(keys[0], key) <= BTREE_EPSILON){
+		#endif
 			keys[0] = keys[1];
 			node_values[0] = node_values[1];
 			node_childs[1] = node_childs[2];
@@ -370,6 +444,20 @@ void remove_key_from_btree(btree tree, uint64_t key, void **value){
 	free(tree);
 	remove_element_success:
 	return;
+}
+
+void *remove_first_key_from_btree(btree tree, btree_k_t *key){
+	btree node;
+	void *value = get_first(tree, key, &node);
+	if (node->use > 0) remove_key_from_btree(node, key[0], NULL);
+	return value;
+}
+
+void *remove_last_key_from_btree(btree tree, btree_k_t *key){
+	btree node;
+	void *value = get_last(tree, key, &node);
+	if (node->use > 0) remove_key_from_btree(node, key[0], NULL);
+	return value;
 }
 
 void freeBtree(btree tree){
